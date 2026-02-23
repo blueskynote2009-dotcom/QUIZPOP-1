@@ -1,0 +1,1435 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QuizPops!</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- ESM Imports for React, Lucide, and Firebase -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.263.1",
+        "firebase/app": "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js",
+        "firebase/firestore": "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js",
+        "firebase/auth": "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js"
+      }
+    }
+  </script>
+  
+  <!-- Babel (ブラウザ上でJSXを変換するため) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-yellow-50">
+  <!-- Reactアプリがマウントされる場所 -->
+  <div id="root"></div>
+
+  <!-- アプリのメインコード -->
+  <script type="text/babel" data-type="module">
+    import React, { useState, useEffect, useRef } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import { initializeApp } from 'firebase/app';
+    import { 
+      getFirestore, collection, doc, setDoc, getDoc, getDocs, 
+      onSnapshot, query, addDoc, deleteDoc, updateDoc 
+    } from 'firebase/firestore';
+    import { 
+      getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken 
+    } from 'firebase/auth';
+    import { 
+      BookOpen, Brain, Globe, ChevronRight, RotateCcw, 
+      Award, ExternalLink, CheckCircle2, XCircle, 
+      Sparkles, Star, Trophy, Target, Settings, Plus, Trash2, Save, X, Lock, Database, Upload,
+      Type, ListOrdered, ArrowDownUp, Check, ArrowLeft, ShoppingCart, User, Share2, KeyRound, DownloadCloud, FileText, Smile
+    } from 'lucide-react';
+
+    // Helper to shuffle array
+    const shuffleArray = (array) => {
+      const newArr = [...array];
+      for (let i = newArr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [newArr[i], newArr[j]] = [newArr[j], newArr[i]];
+      }
+      return newArr;
+    };
+
+    // --- CSV Helper Functions ---
+    const escapeCSV = (str) => {
+      if (str == null) return '';
+      const s = String(str);
+      if (s.includes('"') || s.includes(',') || s.includes('\n')) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    };
+
+    const parseCSV = (text) => {
+      const rows = [];
+      let currentRow = [];
+      let currentCell = '';
+      let inQuotes = false;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        const nextChar = text[i+1];
+        if (inQuotes) {
+          if (char === '"' && nextChar === '"') {
+            currentCell += '"';
+            i++;
+          } else if (char === '"') {
+            inQuotes = false;
+          } else {
+            currentCell += char;
+          }
+        } else {
+          if (char === '"') {
+            inQuotes = true;
+          } else if (char === ',') {
+            currentRow.push(currentCell);
+            currentCell = '';
+          } else if (char === '\n' || (char === '\r' && nextChar === '\n')) {
+            if (char === '\r') i++;
+            currentRow.push(currentCell);
+            rows.push(currentRow);
+            currentRow = [];
+            currentCell = '';
+          } else {
+            currentCell += char;
+          }
+        }
+      }
+      if (currentCell !== '' || currentRow.length > 0) {
+        currentRow.push(currentCell);
+        rows.push(currentRow);
+      }
+      return rows;
+    };
+
+    // --- Audio Helper ---
+    const playSound = (type) => {
+      try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+
+        if (type === 'correct') {
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(880, ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.1);
+          gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.2);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.2);
+        } else if (type === 'incorrect') {
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(150, ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(100, ctx.currentTime + 0.3);
+          gainNode.gain.setValueAtTime(0.3, ctx.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.3);
+        } else if (type === 'finish') {
+          [523.25, 659.25, 783.99, 1046.50].forEach((freq, i) => { 
+            setTimeout(() => {
+              const o = ctx.createOscillator();
+              const g = ctx.createGain();
+              o.type = 'sine';
+              o.frequency.value = freq;
+              o.connect(g);
+              g.connect(ctx.destination);
+              g.gain.setValueAtTime(0.2, ctx.currentTime);
+              g.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
+              o.start();
+              o.stop(ctx.currentTime + 0.5);
+            }, i * 100);
+          });
+        }
+      } catch (e) {
+        console.log("Audio play error", e);
+      }
+    };
+
+    // --- Firebase Configuration ---
+    // ▼▼▼ VERCEL等でデプロイする場合は、以下の情報を書き換えてください ▼▼▼
+    const defaultFirebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_AUTH_DOMAIN",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_STORAGE_BUCKET",
+      messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    // 環境判定 (AIエディタ環境か、Vercel環境か)
+    const firebaseConfig = typeof __firebase_config !== 'undefined' 
+      ? JSON.parse(__firebase_config) 
+      : defaultFirebaseConfig;
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+    
+    // データ保存先のベースID
+    const appId = typeof __app_id !== 'undefined' ? __app_id : (firebaseConfig.projectId || 'my-quiz-app');
+
+    // --- Custom Modal Component ---
+    const CustomModal = ({ config }) => {
+      if (!config) return null;
+      const [inputValue, setInputValue] = useState(config.defaultValue || '');
+
+      return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm px-4">
+          <div className="bg-white rounded-[2rem] p-6 max-w-sm w-full shadow-2xl animate-in zoom-in-95 duration-200">
+            <h3 className="text-xl font-black text-slate-800 mb-2">{config.title}</h3>
+            <p className="text-slate-600 mb-6 font-medium text-sm whitespace-pre-wrap">{config.message}</p>
+            
+            {config.type === 'prompt' && (
+              <input 
+                type="text" 
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                className="w-full p-4 mb-6 bg-slate-50 border-2 border-slate-100 rounded-xl focus:border-pink-400 outline-none transition-all text-slate-700 font-bold"
+                autoFocus
+                placeholder="入力してください..."
+              />
+            )}
+            
+            <div className="flex gap-3 justify-end">
+              {(config.type === 'confirm' || config.type === 'prompt') && (
+                <button 
+                  onClick={config.onCancel}
+                  className="px-5 py-3 rounded-xl font-bold text-slate-500 bg-slate-100 hover:bg-slate-200 transition-all active:scale-95"
+                >
+                  キャンセル
+                </button>
+              )}
+              <button 
+                onClick={() => config.type === 'prompt' ? config.onConfirm(inputValue) : config.onConfirm()}
+                className="px-6 py-3 rounded-xl font-black text-white bg-pink-500 hover:bg-pink-600 shadow-md transition-all active:scale-95"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // --- Affiliate Link Component ---
+    const AffiliateLinkButton = ({ url, label, isQuestionOverride = false }) => {
+      if (!url) return null;
+      return (
+        <a 
+          href={url} 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className={`mt-4 w-full flex items-center justify-between p-4 rounded-2xl border-2 transition-all active:scale-[0.98] ${
+            isQuestionOverride 
+              ? 'bg-gradient-to-r from-orange-50 to-amber-50 border-orange-200 hover:border-orange-400 text-orange-700' 
+              : 'bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200 hover:border-blue-400 text-blue-700'
+          }`}
+        >
+          <div className="flex items-center gap-3">
+            <div className={`p-2 rounded-full ${isQuestionOverride ? 'bg-orange-200 text-orange-600' : 'bg-blue-200 text-blue-600'}`}>
+              <Smile className="w-6 h-6" />
+            </div>
+            <div className="text-left">
+              <p className="text-[10px] font-bold opacity-70 mb-0.5">
+                {isQuestionOverride ? '💬 この問題のイチオシ！' : '💬 案内人のおすすめ！'}
+              </p>
+              <p className="font-bold text-sm leading-tight">{label || '詳細はこちらをチェック'}</p>
+            </div>
+          </div>
+          <ExternalLink className="w-5 h-5 opacity-50" />
+        </a>
+      );
+    };
+
+    function App() {
+      // --- States ---
+      const [user, setUser] = useState(null);
+      const [userStats, setUserStats] = useState({ totalAnswered: 0, totalCorrect: 0, popStars: 0 }); // Learning History
+      const [view, setView] = useState('home'); // home, subcats, quiz, result, admin_login, admin_dashboard, mypage
+      const [categories, setCategories] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [modalConfig, setModalConfig] = useState(null);
+      
+      // Navigation States
+      const [selectedMainCat, setSelectedMainCat] = useState(null);
+      const [currentSubCat, setCurrentSubCat] = useState(null);
+      
+      // Quiz Play States
+      const [currentIdx, setCurrentIdx] = useState(0);
+      const [score, setScore] = useState(0);
+      const [isAnswered, setIsAnswered] = useState(false);
+      const [isCorrect, setIsCorrect] = useState(false);
+      const [animateFeedback, setAnimateFeedback] = useState(null);
+
+      // Type-specific Answer States
+      const [selectedChoice, setSelectedChoice] = useState(null);
+      const [inputText, setInputText] = useState("");
+      const [sortingItems, setSortingItems] = useState([]);
+      const [sortingAnswer, setSortingAnswer] = useState([]);
+      
+      // Data Restore Form States
+      const [restoreForm, setRestoreForm] = useState({ code: '', pin: '' });
+
+      // Admin States
+      const [adminPass, setAdminPass] = useState("");
+      const [adminError, setAdminError] = useState("");
+      const [editingMainCatId, setEditingMainCatId] = useState(null);
+      const [editingSubCatId, setEditingSubCatId] = useState(null);
+      const [isSeeding, setIsSeeding] = useState(false);
+      const fileInputRef = useRef(null); // Reference for CSV file input
+      
+      // New Quiz Form State
+      const [quizType, setQuizType] = useState('choice');
+      const [newQuiz, setNewQuiz] = useState({ 
+        q: '', options: ['', '', '', '', '', '', '', ''], correct: 0, answerText: '', explanation: '', affiliateLabel: '', affiliateUrl: '' 
+      });
+
+      // --- Auth & Data Fetching ---
+      useEffect(() => {
+        const initAuth = async () => {
+          try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
+          } catch (error) {
+            console.error("Auth failed", error);
+            // VercelなどでAPIキーが設定されていない場合のエラー回避
+            if(error.code === 'auth/api-key-not-valid.-please-pass-a-valid-api-key.') {
+               setModalConfig({ type: 'alert', title: '設定エラー', message: 'FirebaseのAPIキーが設定されていません。ソースコード内の defaultFirebaseConfig を書き換えてください。', onConfirm: () => setModalConfig(null) });
+            }
+          }
+        };
+        initAuth();
+        const unsubscribe = onAuthStateChanged(auth, setUser);
+        return () => unsubscribe();
+      }, []);
+
+      // Fetch Categories
+      useEffect(() => {
+        if (!user) return;
+        const categoriesRef = collection(db, 'artifacts', appId, 'public', 'data', 'categories');
+        const unsubscribe = onSnapshot(categoriesRef, (snapshot) => {
+          const cats = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          setCategories(cats);
+          setLoading(false);
+        }, (error) => {
+          console.error("Firestore read error:", error);
+          setLoading(false);
+        });
+        return () => unsubscribe();
+      }, [user]);
+
+      // Fetch User Stats (Learning History)
+      useEffect(() => {
+        if (!user) return;
+        const statsRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'stats');
+        const unsubscribe = onSnapshot(statsRef, (docSnap) => {
+          if (docSnap.exists()) {
+            setUserStats(docSnap.data());
+          } else {
+            setUserStats({ totalAnswered: 0, totalCorrect: 0, popStars: 0 });
+          }
+        });
+        return () => unsubscribe();
+      }, [user]);
+
+      // --- Quiz Logic Handlers ---
+      const handleSelectMainCat = (mainCat) => {
+        if (!mainCat.subCategories || mainCat.subCategories.length === 0) {
+          setModalConfig({ type: 'alert', title: 'お知らせ', message: 'このカテゴリーにはまだサブカテゴリーがありません。', onConfirm: () => setModalConfig(null) });
+          return;
+        }
+        setSelectedMainCat(mainCat);
+        setView('subcats');
+      };
+
+      const startQuiz = (subCat) => {
+        if (!subCat.questions || subCat.questions.length === 0) {
+          setModalConfig({ type: 'alert', title: 'お知らせ', message: 'このカテゴリーにはまだ問題がありません。', onConfirm: () => setModalConfig(null) });
+          return;
+        }
+        setCurrentSubCat(subCat);
+        setCurrentIdx(0);
+        setScore(0);
+        resetQuestionState(subCat.questions[0]);
+        setView('quiz');
+      };
+
+      const resetQuestionState = (question) => {
+        setIsAnswered(false);
+        setIsCorrect(false);
+        setSelectedChoice(null);
+        setInputText("");
+        setAnimateFeedback(null);
+        if (question.type === 'sorting') {
+          const items = question.options.map((txt, i) => ({ id: i, text: txt }));
+          setSortingItems(shuffleArray(items));
+          setSortingAnswer([]);
+        }
+      };
+
+      const submitAnswer = () => {
+        if (isAnswered) return;
+        const question = currentSubCat.questions[currentIdx];
+        const type = question.type || 'choice'; 
+        let correct = false;
+
+        if (type === 'input') {
+          if (inputText.trim().toLowerCase() === question.answerText.trim().toLowerCase()) correct = true;
+        } else if (type === 'sorting') {
+          const currentAnswerStrings = sortingAnswer.map(item => item.text);
+          if (JSON.stringify(currentAnswerStrings) === JSON.stringify(question.options)) correct = true;
+        }
+
+        handlePostAnswer(correct);
+      };
+
+      const handleChoiceClick = (idx) => {
+        if (isAnswered) return;
+        setSelectedChoice(idx);
+        const question = currentSubCat.questions[currentIdx];
+        handlePostAnswer(idx === question.correct);
+      };
+
+      const handlePostAnswer = (isRight) => {
+        if (isRight) {
+          setScore(prev => prev + 1);
+          setIsCorrect(true);
+          playSound('correct');
+          setAnimateFeedback('correct');
+        } else {
+          setIsCorrect(false);
+          playSound('incorrect');
+          setAnimateFeedback('incorrect');
+        }
+        setIsAnswered(true);
+      };
+
+      // Sorting Handlers
+      const handleAddToSort = (item) => {
+        if (isAnswered) return;
+        setSortingItems(prev => prev.filter(i => i.id !== item.id));
+        setSortingAnswer(prev => [...prev, item]);
+      };
+      const handleRemoveFromSort = (item) => {
+        if (isAnswered) return;
+        setSortingAnswer(prev => prev.filter(i => i.id !== item.id));
+        setSortingItems(prev => [...prev, item]);
+      };
+
+      const finishQuiz = async () => {
+        playSound('finish');
+        setView('result');
+        
+        // データベースに学習履歴を保存
+        if (user) {
+          const newAnswered = (userStats?.totalAnswered || 0) + currentSubCat.questions.length;
+          const newCorrect = (userStats?.totalCorrect || 0) + score;
+          const newPopStars = (userStats?.popStars || 0) + 1;
+          await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'stats'), {
+            totalAnswered: newAnswered,
+            totalCorrect: newCorrect,
+            popStars: newPopStars
+          }, { merge: true });
+        }
+      };
+
+      const nextQuestion = () => {
+        if (currentIdx + 1 < currentSubCat.questions.length) {
+          const nextQ = currentSubCat.questions[currentIdx + 1];
+          setCurrentIdx(currentIdx + 1);
+          resetQuestionState(nextQ);
+        } else {
+          finishQuiz();
+        }
+      };
+
+      const reset = () => {
+        setView('home');
+        setSelectedMainCat(null);
+        setCurrentSubCat(null);
+      };
+
+      const shareOnX = () => {
+        const accuracy = Math.round((score / currentSubCat.questions.length) * 100);
+        const text = `「${currentSubCat.name}」クイズで ${score}/${currentSubCat.questions.length}問 正解しました！🎯\n正解率: ${accuracy}%\n\n#QuizPops #クイズ`;
+        const url = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}`;
+        window.open(url, '_blank');
+      };
+
+      const shareGeneral = async () => {
+        const accuracy = Math.round((score / currentSubCat.questions.length) * 100);
+        const text = `「${currentSubCat.name}」クイズで ${score}/${currentSubCat.questions.length}問 正解しました！🎯\n正解率: ${accuracy}%\n\n#QuizPops #クイズ`;
+        
+        if (navigator.share) {
+          try {
+            await navigator.share({
+              title: 'QuizPopsの結果',
+              text: text,
+              url: window.location.href
+            });
+          } catch (e) {
+            console.log('Share canceled or failed', e);
+          }
+        } else {
+          const textArea = document.createElement("textarea");
+          textArea.value = text + '\n' + window.location.href;
+          document.body.appendChild(textArea);
+          textArea.select();
+          try {
+            document.execCommand('copy');
+            setModalConfig({ type: 'alert', title: 'コピー完了', message: '結果のテキストをコピーしました！LINEやInstagramなどに貼り付けてシェアしてください。', onConfirm: () => setModalConfig(null) });
+          } catch (err) {
+            setModalConfig({ type: 'alert', title: 'エラー', message: 'お使いのブラウザではシェア機能がサポートされていません。', onConfirm: () => setModalConfig(null) });
+          }
+          document.body.removeChild(textArea);
+        }
+      };
+
+      // --- Data Transfer Logic ---
+      const generateTransferCode = async () => {
+        if (!userStats || userStats.totalAnswered === 0) {
+          setModalConfig({ type: 'alert', title: 'エラー', message: '引き継ぐデータがまだありません。まずはクイズに挑戦しましょう！', onConfirm: () => setModalConfig(null) });
+          return;
+        }
+        
+        // ランダムなIDとPINを生成
+        const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+        const pin = Math.floor(1000 + Math.random() * 9000).toString();
+        
+        try {
+          await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'transfers', code), {
+            pin,
+            stats: userStats,
+            createdAt: Date.now()
+          });
+          setModalConfig({
+            type: 'alert',
+            title: '引継ぎコード発行完了',
+            message: `以下の情報を必ずメモしてください！\n\n【引継ぎID】 ${code}\n【パスワード】 ${pin}\n\n※この画面をスクリーンショット等で保存することをおすすめします。`,
+            onConfirm: () => setModalConfig(null)
+          });
+        } catch(e) {
+          console.error(e);
+          setModalConfig({ type: 'alert', title: 'エラー', message: 'コードの発行に失敗しました。', onConfirm: () => setModalConfig(null) });
+        }
+      };
+
+      const handleRestoreData = async () => {
+        if (!restoreForm.code || !restoreForm.pin) {
+          setModalConfig({ type: 'alert', title: 'エラー', message: '引継ぎIDとパスワードを両方入力してください。', onConfirm: () => setModalConfig(null) });
+          return;
+        }
+
+        try {
+          const transferRef = doc(db, 'artifacts', appId, 'public', 'data', 'transfers', restoreForm.code.toUpperCase());
+          const snap = await getDoc(transferRef);
+          
+          if (snap.exists() && snap.data().pin === restoreForm.pin) {
+            const restoredStats = snap.data().stats;
+            await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'stats'), restoredStats, { merge: true });
+            setRestoreForm({ code: '', pin: '' });
+            setModalConfig({ type: 'alert', title: '復元成功！', message: '学習データを無事に復元しました。', onConfirm: () => { setModalConfig(null); setView('home'); } });
+          } else {
+            setModalConfig({ type: 'alert', title: 'エラー', message: '引継ぎIDまたはパスワードが間違っています。', onConfirm: () => setModalConfig(null) });
+          }
+        } catch(e) {
+          console.error(e);
+          setModalConfig({ type: 'alert', title: 'エラー', message: '通信エラーが発生しました。', onConfirm: () => setModalConfig(null) });
+        }
+      };
+
+      // --- Admin Logic & CSV ---
+      const handleAdminLogin = (e) => {
+        e.preventDefault();
+        if (adminPass === "admin123") {
+          setView('admin_dashboard');
+          setAdminError("");
+          setAdminPass("");
+        } else {
+          setAdminError("パスワードが違います");
+        }
+      };
+
+      const exportCSV = () => {
+        const headers = [
+          "メインカテゴリ", "メイン絵文字", "メイン色", 
+          "サブカテゴリ", "サブ説明", "サブアフィラベル", "サブアフィURL", 
+          "問題形式(choice/boolean/input/sorting)", "問題文", "選択肢1", "選択肢2", "選択肢3", "選択肢4", "選択肢5", "選択肢6", "選択肢7", "選択肢8", "正解", "解説", "問題個別アフィラベル", "問題個別アフィURL"
+        ];
+        let csvContent = headers.join(",") + "\n";
+        
+        categories.forEach(mainCat => {
+          const mainFields = [mainCat.name, mainCat.emoji, mainCat.color].map(escapeCSV);
+          
+          if (!mainCat.subCategories || mainCat.subCategories.length === 0) {
+            csvContent += [...mainFields, ...Array(18).fill('""')].join(",") + "\n";
+          } else {
+            mainCat.subCategories.forEach(subCat => {
+              const subFields = [subCat.name, subCat.description, subCat.affiliateLabel, subCat.affiliateUrl].map(escapeCSV);
+              
+              if (!subCat.questions || subCat.questions.length === 0) {
+                csvContent += [...mainFields, ...subFields, ...Array(14).fill('""')].join(",") + "\n";
+              } else {
+                subCat.questions.forEach(q => {
+                  const opts = q.options || [];
+                  const correct = q.type === 'input' ? q.answerText : q.correct;
+                  const qFields = [
+                    q.type, q.q, opts[0]||'', opts[1]||'', opts[2]||'', opts[3]||'', opts[4]||'', opts[5]||'', opts[6]||'', opts[7]||'',
+                    correct, q.explanation, q.affiliateLabel, q.affiliateUrl
+                  ].map(escapeCSV);
+                  csvContent += [...mainFields, ...subFields, ...qFields].join(",") + "\n";
+                });
+              }
+            });
+          }
+        });
+
+        // 漢字化けを防ぐため BOM を追加
+        const blob = new Blob([new Uint8Array([0xEF, 0xBB, 0xBF]), csvContent], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.setAttribute("download", "quizpops_data.csv");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      const handleFileUpload = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = async (evt) => {
+          const text = evt.target.result;
+          const rows = parseCSV(text);
+          if (rows.length < 2) {
+            setModalConfig({ type: 'alert', title: 'エラー', message: '有効なCSVファイルではありません。', onConfirm: () => setModalConfig(null) });
+            return;
+          }
+          
+          const newCategoriesMap = {};
+          rows.slice(1).forEach(row => {
+            if (row.length < 2 || !row[0]) return; // Skip empty rows
+            const mainName = row[0];
+            if (!newCategoriesMap[mainName]) {
+              newCategoriesMap[mainName] = {
+                name: mainName,
+                emoji: row[1] || '📚',
+                color: row[2] || 'from-pink-400 to-purple-500',
+                subCategoriesMap: {}
+              };
+            }
+            
+            const subName = row[3];
+            if (!subName) return; // Main cat only
+            
+            if (!newCategoriesMap[mainName].subCategoriesMap[subName]) {
+              newCategoriesMap[mainName].subCategoriesMap[subName] = {
+                id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
+                name: subName,
+                description: row[4] || '',
+                affiliateLabel: row[5] || '',
+                affiliateUrl: row[6] || '',
+                questions: []
+              };
+            }
+            
+            const qType = row[7];
+            if (!qType) return; // Sub cat only
+            
+            const question = {
+              type: qType,
+              q: row[8] || '',
+              explanation: row[18] || '',
+              affiliateLabel: row[19] || '',
+              affiliateUrl: row[20] || ''
+            };
+            
+            if (qType === 'choice' || qType === 'sorting') {
+              question.options = [row[9], row[10], row[11], row[12], row[13], row[14], row[15], row[16]].filter(o => o !== undefined && o !== null);
+              // try parse to int, else keep string
+              question.correct = isNaN(parseInt(row[17])) ? row[17] : parseInt(row[17]);
+            } else if (qType === 'boolean') {
+              question.options = ['〇', '✕'];
+              question.correct = isNaN(parseInt(row[17])) ? 0 : parseInt(row[17]);
+            } else if (qType === 'input') {
+              question.answerText = row[17] || '';
+            }
+            
+            newCategoriesMap[mainName].subCategoriesMap[subName].questions.push(question);
+          });
+          
+          // Confirm overwrite
+          setModalConfig({
+            type: 'confirm',
+            title: 'インポートの確認',
+            message: 'CSVのデータをインポートします。同じ名前のメインカテゴリは上書き（マージ）されます。\nよろしいですか？',
+            onConfirm: async () => {
+              setModalConfig(null);
+              setIsSeeding(true);
+              try {
+                for (const mainName of Object.keys(newCategoriesMap)) {
+                  const draftMain = newCategoriesMap[mainName];
+                  const subCategories = Object.values(draftMain.subCategoriesMap);
+                  const finalMainData = {
+                    name: draftMain.name,
+                    emoji: draftMain.emoji,
+                    color: draftMain.color,
+                    subCategories: subCategories
+                  };
+                  
+                  const existing = categories.find(c => c.name === draftMain.name);
+                  if (existing) {
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', existing.id), finalMainData);
+                  } else {
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'categories'), finalMainData);
+                  }
+                }
+                setModalConfig({ type: 'alert', title: '完了', message: 'CSVのインポートが完了しました。', onConfirm: () => setModalConfig(null) });
+              } catch(e) {
+                console.error(e);
+                setModalConfig({ type: 'alert', title: 'エラー', message: 'インポート中にエラーが発生しました。', onConfirm: () => setModalConfig(null) });
+              } finally {
+                setIsSeeding(false);
+                if (fileInputRef.current) fileInputRef.current.value = '';
+              }
+            },
+            onCancel: () => {
+              setModalConfig(null);
+              if (fileInputRef.current) fileInputRef.current.value = '';
+            }
+          });
+        };
+        reader.readAsText(file);
+      };
+
+      const addMainCategory = () => {
+        setModalConfig({
+          type: 'prompt', title: 'メインカテゴリ作成', message: 'カテゴリ名を入力してください', defaultValue: '',
+          onConfirm: async (name) => {
+            setModalConfig(null);
+            if (!name) return;
+            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'categories'), {
+              name, emoji: '📚', color: 'from-pink-400 to-purple-500', subCategories: []
+            });
+          },
+          onCancel: () => setModalConfig(null)
+        });
+      };
+
+      const deleteMainCategory = (id) => {
+        setModalConfig({
+          type: 'confirm', title: '確認', message: 'このメインカテゴリを削除しますか？',
+          onConfirm: async () => {
+            setModalConfig(null);
+            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', id));
+          },
+          onCancel: () => setModalConfig(null)
+        });
+      };
+
+      const addSubCategory = (mainCat) => {
+        setModalConfig({
+          type: 'prompt', title: 'サブカテゴリ作成', message: 'サブカテゴリ名を入力してください', defaultValue: '',
+          onConfirm: async (name) => {
+            setModalConfig(null);
+            if (!name) return;
+            const newSub = {
+              id: Date.now().toString(),
+              name,
+              description: '新しいサブカテゴリ',
+              affiliateLabel: '',
+              affiliateUrl: '',
+              questions: []
+            };
+            const updatedSubs = [...(mainCat.subCategories || []), newSub];
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', mainCat.id), { subCategories: updatedSubs });
+          },
+          onCancel: () => setModalConfig(null)
+        });
+      };
+
+      const deleteSubCategory = async (mainCat, subCatId) => {
+        if (!confirm('このサブカテゴリを削除しますか？')) return;
+        const updatedSubs = mainCat.subCategories.filter(s => s.id !== subCatId);
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', mainCat.id), { subCategories: updatedSubs });
+      };
+
+      const saveSubCategoryDetails = async (mainCat, subCat, updatedFields) => {
+        const updatedSubs = mainCat.subCategories.map(s => s.id === subCat.id ? { ...s, ...updatedFields } : s);
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', mainCat.id), { subCategories: updatedSubs });
+        setModalConfig({ type: 'alert', title: '保存完了', message: 'サブカテゴリ情報を更新しました', onConfirm: () => setModalConfig(null) });
+      };
+
+      const addQuestionToSubCategory = async (mainCat, subCat) => {
+        if (!newQuiz.q || !newQuiz.explanation) {
+          setModalConfig({ type: 'alert', title: 'エラー', message: '問題文と解説を入力してください', onConfirm: () => setModalConfig(null) });
+          return;
+        }
+        const finalQuiz = { type: quizType, q: newQuiz.q, explanation: newQuiz.explanation, affiliateLabel: newQuiz.affiliateLabel, affiliateUrl: newQuiz.affiliateUrl };
+        if (quizType === 'choice') {
+          finalQuiz.options = newQuiz.options.slice(0, 8);
+          finalQuiz.correct = newQuiz.correct;
+        } else if (quizType === 'boolean') {
+          finalQuiz.options = ['〇', '✕']; 
+          finalQuiz.correct = newQuiz.correct;
+        } else if (quizType === 'input') {
+          finalQuiz.answerText = newQuiz.answerText;
+        } else if (quizType === 'sorting') {
+          finalQuiz.options = newQuiz.options.filter(o => o.trim() !== '');
+        }
+
+        const targetSub = mainCat.subCategories.find(s => s.id === subCat.id);
+        const updatedQuestions = [...(targetSub.questions || []), finalQuiz];
+        const updatedSubs = mainCat.subCategories.map(s => s.id === subCat.id ? { ...s, questions: updatedQuestions } : s);
+        
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', mainCat.id), { subCategories: updatedSubs });
+        setNewQuiz({ q: '', options: ['', '', '', '', '', '', '', ''], correct: 0, answerText: '', explanation: '', affiliateLabel: '', affiliateUrl: '' });
+      };
+
+      const deleteQuestionFromSubCategory = async (mainCat, subCat, qIdx) => {
+        if (!confirm('問題を削除しますか？')) return;
+        const targetSub = mainCat.subCategories.find(s => s.id === subCat.id);
+        const updatedQuestions = targetSub.questions.filter((_, i) => i !== qIdx);
+        const updatedSubs = mainCat.subCategories.map(s => s.id === subCat.id ? { ...s, questions: updatedQuestions } : s);
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'categories', mainCat.id), { subCategories: updatedSubs });
+      };
+
+      const performSeed = async () => {
+        setIsSeeding(true);
+        const categoriesRef = collection(db, 'artifacts', appId, 'public', 'data', 'categories');
+        
+        const seedData = [
+          {
+            name: 'TOEIC対策', emoji: '🏢', color: 'from-blue-500 to-indigo-600',
+            subCategories: [
+              {
+                id: 'sub_toeic_1', name: 'Part 5 (短文穴埋め)', description: '文法・語彙問題を攻略',
+                affiliateLabel: 'TOEIC文法特化のおすすめ参考書', affiliateUrl: 'https://example.com/toeic-part5',
+                questions: [
+                  { type: 'choice', q: 'The new policy requires that all employees _______ their ID badges.', options: ['wear', 'wears', 'wearing', 'wore'], correct: 0, explanation: 'require that S + (should) + 動詞の原形 のルールが適用されます。' }
+                ]
+              }
+            ]
+          },
+          {
+            name: '一般教養・雑学', emoji: '💡', color: 'from-yellow-400 to-orange-500',
+            subCategories: [
+              {
+                id: 'sub_zatsugaku_1', name: 'スピード〇✕', description: '直感を信じろ！瞬発力クイズ',
+                affiliateLabel: '大人の雑学力ドリル', affiliateUrl: 'https://example.com/zatsugaku',
+                questions: [
+                  { type: 'boolean', q: 'トマトは「野菜」である（植物学上の分類）', correct: 1, explanation: '植物学上は「果実」に分類されますが、市場や栄養学的には野菜として扱われます。', affiliateLabel: '野菜と果物の違いがわかる図鑑', affiliateUrl: 'https://example.com/tomato' },
+                  { type: 'boolean', q: '1円玉の直径はちょうど2センチである', correct: 0, explanation: '1円玉の直径は20mm（2cm）、重さは1gです。定規や分銅の代わりになります。' }
+                ]
+              },
+              {
+                id: 'sub_zatsugaku_2', name: 'ランキング王', description: '大きい順、古い順...順番を当てろ！',
+                affiliateLabel: 'ランキング雑学事典', affiliateUrl: '',
+                questions: [
+                  { type: 'sorting', q: '紙のサイズ、面積が大きい順に並べ替えよ', options: ['A3', 'B4', 'A4', 'B5'], explanation: 'A3 > B4 > A4 > B5 となります。' }
+                ]
+              }
+            ]
+          }
+        ];
+
+        try {
+          for (const cat of seedData) { await addDoc(categoriesRef, cat); }
+          setModalConfig({ type: 'alert', title: '成功', message: '階層型のサンプルデータを追加しました！', onConfirm: () => setModalConfig(null) });
+        } catch (e) {
+          console.error(e);
+          setModalConfig({ type: 'alert', title: 'エラー', message: 'エラーが発生しました', onConfirm: () => setModalConfig(null) });
+        } finally {
+          setIsSeeding(false);
+        }
+      };
+
+      const seedDatabase = () => {
+        if (categories.length > 0) {
+          setModalConfig({
+            type: 'confirm', title: '確認', message: '既存データを維持したまま新しいサンプルを追加しますか？\n\n※表示がおかしくなる場合は、一度古いカテゴリをごみ箱アイコンから削除してください。',
+            onConfirm: () => { setModalConfig(null); performSeed(); },
+            onCancel: () => setModalConfig(null)
+          });
+        } else {
+          performSeed();
+        }
+      };
+
+      const getRank = () => {
+        if (!currentSubCat) return { title: '-', color: 'text-slate-400' };
+        const ratio = score / currentSubCat.questions.length;
+        if (ratio === 1) return { title: '全知全能', color: 'text-yellow-500' };
+        if (ratio >= 0.6) return { title: 'マスター', color: 'text-pink-500' };
+        return { title: '修行中', color: 'text-slate-400' };
+      };
+
+      // --- Render Question Components ---
+      const RenderChoice = ({ question }) => (
+        <div className="grid gap-4">
+          {question.options.map((option, idx) => {
+            if (!option || option.trim() === '') return null; // 空欄の選択肢はスキップして表示しない
+
+            let buttonClass = "w-full p-5 rounded-[2rem] border-b-4 text-left font-bold text-lg transition-all flex items-center justify-between ";
+            if (!isAnswered) {
+              buttonClass += "bg-white border-slate-200 text-slate-700 hover:border-pink-300 hover:bg-pink-50 active:translate-y-1";
+            } else {
+              if (idx === question.correct) buttonClass += "bg-emerald-50 border-emerald-500 text-emerald-700 scale-[1.02] z-10";
+              else if (idx === selectedChoice) buttonClass += "bg-red-50 border-red-500 text-red-700";
+              else buttonClass += "bg-slate-50 border-slate-100 text-slate-300 opacity-60";
+            }
+            return (
+              <button key={idx} onClick={() => handleChoiceClick(idx)} disabled={isAnswered} className={buttonClass}>
+                <span>{option}</span>
+                {isAnswered && idx === question.correct && <div className="bg-emerald-500 p-1 rounded-full text-white"><CheckCircle2 className="w-5 h-5" /></div>}
+                {isAnswered && idx === selectedChoice && idx !== question.correct && <div className="bg-red-500 p-1 rounded-full text-white"><XCircle className="w-5 h-5" /></div>}
+              </button>
+            );
+          })}
+        </div>
+      );
+
+      const RenderBoolean = ({ question }) => (
+        <div className="grid grid-cols-2 gap-4 h-40">
+          <button onClick={() => handleChoiceClick(0)} disabled={isAnswered}
+            className={`rounded-[2rem] border-b-8 font-black text-6xl flex items-center justify-center transition-all active:translate-y-1 active:border-b-0 ${isAnswered ? (question.correct === 0 ? 'bg-red-500 border-red-700 text-white ring-4 ring-red-200' : 'bg-slate-200 border-slate-300 text-slate-400 opacity-50') : 'bg-white border-red-200 text-red-500 hover:bg-red-50'}`}
+          >〇</button>
+          <button onClick={() => handleChoiceClick(1)} disabled={isAnswered}
+            className={`rounded-[2rem] border-b-8 font-black text-6xl flex items-center justify-center transition-all active:translate-y-1 active:border-b-0 ${isAnswered ? (question.correct === 1 ? 'bg-blue-500 border-blue-700 text-white ring-4 ring-blue-200' : 'bg-slate-200 border-slate-300 text-slate-400 opacity-50') : 'bg-white border-blue-200 text-blue-500 hover:bg-blue-50'}`}
+          >✕</button>
+        </div>
+      );
+
+      const RenderInput = () => (
+        <div className="space-y-6">
+          <input type="text" placeholder="答えを入力..." value={inputText} onChange={(e) => setInputText(e.target.value)} disabled={isAnswered} onKeyDown={(e) => { if (e.key === 'Enter') submitAnswer(); }}
+            className="w-full p-5 text-2xl font-bold text-center border-b-4 border-slate-200 bg-white rounded-[2rem] focus:outline-none focus:border-pink-500 focus:bg-pink-50 transition-all placeholder:text-slate-300"
+          />
+          {!isAnswered && (
+            <button onClick={submitAnswer} className="w-full bg-pink-500 text-white font-black py-4 rounded-[2rem] shadow-lg border-b-4 border-pink-700 hover:brightness-110 active:translate-y-1 active:border-b-0 active:mb-[4px] transition-all">回答する</button>
+          )}
+          {isAnswered && (
+            <div className={`p-4 rounded-2xl text-center font-bold text-lg ${isCorrect ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+              {isCorrect ? 'Correct! 正解です' : `不正解... 正解は: ${currentSubCat.questions[currentIdx].answerText}`}
+            </div>
+          )}
+        </div>
+      );
+
+      const RenderSorting = ({ question }) => (
+        <div className="space-y-6">
+          <div className="text-center text-slate-400 text-xs font-bold mb-2">順番にタップして並べ替えよう</div>
+          <div className="flex flex-wrap gap-2 min-h-[100px] bg-slate-100/50 p-4 rounded-[2rem] border-2 border-dashed border-slate-300 items-start content-start">
+            {sortingAnswer.length === 0 && !isAnswered && <div className="w-full text-center text-slate-300 py-6 font-bold">ここを選択</div>}
+            {sortingAnswer.map((item) => (
+              <button key={item.id} onClick={() => handleRemoveFromSort(item)} disabled={isAnswered} className={`px-4 py-2 bg-white rounded-xl shadow-sm border-b-4 border-indigo-200 font-bold text-slate-700 flex items-center gap-2 animate-in zoom-in duration-200 ${isAnswered ? 'border-none' : 'hover:bg-red-50'}`}>
+                <span>{item.text}</span>{!isAnswered && <X className="w-3 h-3 text-red-300" />}
+              </button>
+            ))}
+          </div>
+          {!isAnswered && (
+            <div className="flex flex-wrap gap-2 justify-center">
+              {sortingItems.map((item) => (
+                <button key={item.id} onClick={() => handleAddToSort(item)} className="px-4 py-3 bg-white rounded-xl shadow border-b-4 border-slate-200 font-bold text-slate-600 hover:bg-indigo-50 hover:border-indigo-300 hover:-translate-y-1 transition-all active:translate-y-0">{item.text}</button>
+              ))}
+            </div>
+          )}
+          {!isAnswered && sortingItems.length === 0 && (
+             <button onClick={submitAnswer} className="w-full bg-pink-500 text-white font-black py-4 rounded-[2rem] shadow-lg border-b-4 border-pink-700 hover:brightness-110 active:translate-y-1 active:border-b-0 active:mb-[4px] transition-all">これで決定！</button>
+          )}
+          {isAnswered && (
+            <div className={`p-4 rounded-2xl text-center font-bold text-lg ${isCorrect ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+              {isCorrect ? 'Great! 正解です' : '残念！順番が違います'}
+              {!isCorrect && <div className="mt-2 text-sm text-slate-600">正解: {question.options.join(' ')}</div>}
+            </div>
+          )}
+        </div>
+      );
+
+      // --- Main Render ---
+      if (loading) {
+        return (
+          <div className="min-h-screen flex items-center justify-center bg-yellow-50">
+            <div className="w-12 h-12 border-4 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
+          </div>
+        );
+      }
+
+      // Calculate current affiliate info
+      let currentAffiliate = { url: '', label: '', isOverride: false };
+      if (view === 'quiz' && currentSubCat && isAnswered) {
+        const q = currentSubCat.questions[currentIdx];
+        if (q.affiliateUrl) {
+          currentAffiliate = { url: q.affiliateUrl, label: q.affiliateLabel, isOverride: true };
+        } else {
+          currentAffiliate = { url: currentSubCat.affiliateUrl, label: currentSubCat.affiliateLabel, isOverride: false };
+        }
+      }
+
+      // Calculate Overall Accuracy for MyPage
+      const overallAccuracy = userStats?.totalAnswered > 0 
+        ? Math.round((userStats.totalCorrect / userStats.totalAnswered) * 100) 
+        : 0;
+
+      // Calculate total questions count
+      const totalQuestionsCount = categories.reduce((total, mainCat) => {
+        return total + (mainCat.subCategories?.reduce((subTotal, subCat) => {
+          return subTotal + (subCat.questions?.length || 0);
+        }, 0) || 0);
+      }, 0);
+
+      return (
+        <div className="flex flex-col min-h-[100dvh] bg-gradient-to-br from-yellow-50 via-orange-50 to-pink-50 text-slate-900 font-sans">
+          <style>{`
+            @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-10px); } 75% { transform: translateX(10px); } }
+            .animate-shake { animation: shake 0.4s ease-in-out; }
+            @keyframes pop-in-out { 0% { transform: scale(0.5); opacity: 0; } 15% { transform: scale(1.2); opacity: 1; } 30% { transform: scale(1); opacity: 1; } 80% { transform: scale(1); opacity: 1; } 100% { transform: scale(1.1); opacity: 0; } }
+            .animate-pop-in-out { animation: pop-in-out 1.2s forwards cubic-bezier(0.175, 0.885, 0.32, 1.275); pointer-events: none; }
+            ::-webkit-scrollbar { width: 0px; background: transparent; }
+          `}</style>
+
+          <CustomModal config={modalConfig} />
+
+          <header className="flex-none px-4 py-6 text-center relative z-10">
+            <div className="inline-flex items-center gap-3 bg-white px-6 py-3 rounded-full shadow-lg border-b-4 border-pink-200 cursor-pointer active:translate-y-1 transition-all" onClick={reset}>
+              <div className="w-10 h-10 bg-pink-500 rounded-full flex items-center justify-center text-white shadow-inner animate-pulse-slow"><Sparkles className="w-6 h-6" /></div>
+              <h1 className="text-2xl font-black text-pink-500 tracking-tighter">QuizPops!</h1>
+            </div>
+          </header>
+
+          <main className="flex-1 w-full max-w-xl mx-auto px-4 flex flex-col pb-20">
+            
+            {/* VIEW: HOME (Main Categories) */}
+            {view === 'home' && (
+              <div className="space-y-8 animate-in fade-in zoom-in-95 duration-500">
+                <div className="text-center space-y-3">
+                  <h2 className="text-4xl font-black text-slate-800 leading-tight">どのジャンルに<br/><span className="text-pink-500">挑戦</span>する？</h2>
+                  <div className="inline-block bg-white/60 backdrop-blur-sm px-5 py-2 rounded-full shadow-sm border border-pink-100">
+                    <p className="text-sm font-bold text-slate-500">現在 <span className="text-pink-500 text-xl font-black">{totalQuestionsCount}</span> 問収録！</p>
+                  </div>
+                </div>
+                <div className="grid gap-5">
+                  {categories.map((cat) => (
+                    <button key={cat.id} onClick={() => handleSelectMainCat(cat)} className="group relative bg-white overflow-hidden p-6 rounded-[2.5rem] border-b-8 border-slate-200 hover:border-pink-300 hover:shadow-xl hover:-translate-y-1 transition-all text-left flex items-center gap-5">
+                      <div className={`w-16 h-16 bg-gradient-to-br ${cat.color} rounded-3xl flex items-center justify-center text-white text-3xl shadow-lg group-hover:rotate-6 transition-transform`}>{cat.emoji || '📚'}</div>
+                      <div className="flex-1">
+                        <h3 className="font-black text-xl text-slate-800">{cat.name}</h3>
+                        <p className="text-slate-400 text-sm font-medium mt-1">{cat.subCategories?.length || 0} 個のコース</p>
+                      </div>
+                      <ChevronRight className="w-6 h-6 text-slate-300" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* VIEW: MY PAGE (Learning History & Data Transfer) */}
+            {view === 'mypage' && (
+              <div className="space-y-6 animate-in slide-in-from-bottom-8 duration-300">
+                 <div className="flex items-center gap-4 mb-6">
+                  <button onClick={() => setView('home')} className="p-3 bg-white rounded-full shadow-md hover:bg-slate-50 transition-colors">
+                    <ArrowLeft className="w-6 h-6 text-slate-600" />
+                  </button>
+                  <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                    <User className="w-6 h-6 text-blue-500" /> マイページ
+                  </h2>
+                </div>
+
+                {/* Stats Overview */}
+                <div className="bg-white p-6 rounded-[2rem] shadow-lg border-2 border-slate-100 relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-bl-[100px] -z-10" />
+                  <h3 className="text-slate-500 font-bold mb-4">あなたの学習記録</h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    
+                    {/* Pop Stars Card */}
+                    <div className="col-span-2 bg-gradient-to-r from-yellow-50 to-amber-50 p-4 rounded-2xl border-2 border-yellow-200 flex items-center justify-between shadow-sm">
+                      <div className="flex items-center gap-3">
+                        <div className="bg-yellow-400 p-2.5 rounded-xl shadow-inner">
+                          <Star className="w-6 h-6 text-white fill-white" />
+                        </div>
+                        <p className="font-bold text-yellow-700">集めたポップスター</p>
+                      </div>
+                      <p className="text-3xl font-black text-yellow-600">{userStats?.popStars || 0}<span className="text-sm ml-1 text-yellow-700/70 font-bold">個</span></p>
+                    </div>
+
+                    <div className="bg-slate-50 p-4 rounded-2xl text-center">
+                      <p className="text-xs font-bold text-slate-400 mb-1">解いた問題数</p>
+                      <p className="text-3xl font-black text-slate-800">{userStats?.totalAnswered || 0}<span className="text-sm ml-1 text-slate-500">問</span></p>
+                    </div>
+                    <div className="bg-blue-50 p-4 rounded-2xl text-center border border-blue-100">
+                      <p className="text-xs font-bold text-blue-400 mb-1">総合正解率</p>
+                      <p className="text-3xl font-black text-blue-600">{overallAccuracy}<span className="text-sm ml-1">%</span></p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Data Transfer Section */}
+                <div className="bg-white p-6 rounded-[2rem] shadow-lg border-2 border-slate-100 space-y-6">
+                  <div>
+                    <h3 className="text-lg font-black text-slate-800 flex items-center gap-2 mb-2">
+                      <KeyRound className="w-5 h-5 text-orange-500" /> データ引継ぎ（バックアップ）
+                    </h3>
+                    <p className="text-xs text-slate-500 leading-relaxed font-medium">
+                      個人情報の登録なしでデータを引き継げます。「引継ぎコード」を発行して、別のスマホやブラウザで入力してください。
+                    </p>
+                  </div>
+
+                  <div className="space-y-3 pt-2">
+                    <button onClick={generateTransferCode} className="w-full bg-orange-100 text-orange-600 font-bold py-4 rounded-2xl hover:bg-orange-200 active:scale-[0.98] transition-all flex justify-center items-center gap-2 border border-orange-200">
+                      <DownloadCloud className="w-5 h-5" /> 引継ぎコードを発行する
+                    </button>
+                  </div>
+
+                  <div className="pt-6 border-t border-dashed border-slate-200 space-y-4">
+                    <p className="text-sm font-bold text-slate-600">データを復元する</p>
+                    <input 
+                      type="text" 
+                      placeholder="引継ぎID (例: ABCDEF)" 
+                      className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-xl text-sm font-bold focus:border-blue-400 outline-none uppercase"
+                      value={restoreForm.code}
+                      onChange={(e) => setRestoreForm({...restoreForm, code: e.target.value})}
+                    />
+                    <input 
+                      type="text" 
+                      placeholder="パスワード (4桁)" 
+                      className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-xl text-sm font-bold focus:border-blue-400 outline-none"
+                      value={restoreForm.pin}
+                      onChange={(e) => setRestoreForm({...restoreForm, pin: e.target.value})}
+                    />
+                    <button onClick={handleRestoreData} className="w-full bg-slate-800 text-white font-bold py-4 rounded-2xl hover:bg-slate-700 active:scale-[0.98] transition-all">
+                      復元を実行する
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* VIEW: SUBCATEGORIES */}
+            {view === 'subcats' && selectedMainCat && (
+              <div className="space-y-6 animate-in slide-in-from-right-8 duration-300">
+                <div className="flex items-center gap-4 mb-8">
+                  <button onClick={() => setView('home')} className="p-3 bg-white rounded-full shadow-md hover:bg-slate-50 transition-colors">
+                    <ArrowLeft className="w-6 h-6 text-slate-600" />
+                  </button>
+                  <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                    <span>{selectedMainCat.emoji}</span> {selectedMainCat.name}
+                  </h2>
+                </div>
+
+                <div className="grid gap-4">
+                  {selectedMainCat.subCategories?.map((sub) => (
+                    <button key={sub.id} onClick={() => startQuiz(sub)} className="bg-white p-6 rounded-3xl border-2 border-slate-100 hover:border-pink-300 hover:shadow-lg transition-all text-left group">
+                      <h3 className="font-black text-lg text-slate-800 group-hover:text-pink-500 transition-colors">{sub.name}</h3>
+                      <p className="text-sm text-slate-500 mt-1">{sub.description}</p>
+                      <div className="mt-4 flex gap-2">
+                        <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded-full font-bold text-slate-500">{sub.questions?.length || 0}問</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* VIEW: QUIZ */}
+            {view === 'quiz' && currentSubCat && (
+              <div className={`flex-1 flex flex-col w-full animate-in slide-in-from-right-8 duration-500 relative ${animateFeedback === 'incorrect' ? 'animate-shake' : ''}`}>
+                
+                {/* Animations Overlay */}
+                {(animateFeedback === 'correct' || animateFeedback === 'incorrect') && (
+                  <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
+                    <div className="animate-pop-in-out">
+                      {animateFeedback === 'correct' ? <CheckCircle2 className="w-40 h-40 text-emerald-500 drop-shadow-2xl bg-white/90 rounded-full" /> : <XCircle className="w-40 h-40 text-red-500 drop-shadow-2xl bg-white/90 rounded-full" />}
+                    </div>
+                  </div>
+                )}
+
+                {/* 上部固定エリア */}
+                <div className="flex-none space-y-5 pt-2">
+                  <div className="w-full bg-white/50 h-3 rounded-full overflow-hidden border border-white p-0.5 shadow-inner">
+                    <div className="h-full bg-gradient-to-r from-pink-400 to-orange-400 rounded-full transition-all duration-500" style={{ width: `${((currentIdx + 1) / (currentSubCat.questions?.length || 1)) * 100}%` }} />
+                  </div>
+
+                  <div className="bg-white p-6 md:p-8 rounded-[2rem] shadow-xl border-b-8 border-slate-100 relative">
+                    <div className="absolute -top-4 -left-2 bg-yellow-400 text-slate-900 font-black px-4 py-1 rounded-lg rotate-[-5deg] shadow-lg text-sm border-2 border-white flex gap-2">
+                      <span>第 {currentIdx + 1} 問</span>
+                      {currentSubCat.questions[currentIdx].type === 'input' && <span className="bg-blue-500 text-white px-1 rounded text-xs">入力</span>}
+                      {currentSubCat.questions[currentIdx].type === 'sorting' && <span className="bg-indigo-500 text-white px-1 rounded text-xs">並べ替え</span>}
+                      {currentSubCat.questions[currentIdx].type === 'boolean' && <span className="bg-red-500 text-white px-1 rounded text-xs">〇✕</span>}
+                    </div>
+                    <h2 className="text-xl md:text-2xl font-black text-center text-slate-800 mt-4 leading-relaxed">
+                      {currentSubCat.questions[currentIdx]?.q}
+                    </h2>
+                  </div>
+                </div>
+
+                {/* スクロールエリア */}
+                <div className="flex-1 overflow-y-auto py-6 space-y-6 flex flex-col">
+                  <div className="flex-none">
+                    {(currentSubCat.questions[currentIdx].type === 'input') ? <RenderInput /> : (currentSubCat.questions[currentIdx].type === 'sorting') ? <RenderSorting question={currentSubCat.questions[currentIdx]} /> : (currentSubCat.questions[currentIdx].type === 'boolean') ? <RenderBoolean question={currentSubCat.questions[currentIdx]} /> : <RenderChoice question={currentSubCat.questions[currentIdx]} />}
+                  </div>
+
+                  {isAnswered && (
+                    <div className="flex-none space-y-4 animate-in fade-in slide-in-from-top-4 duration-500 pb-4">
+                      <div className="bg-yellow-50 p-6 rounded-[2rem] border-2 border-dashed border-yellow-300 relative shadow-sm">
+                        <div className="absolute -top-3 left-6 bg-white px-2 text-orange-500 text-xs font-bold uppercase tracking-widest border border-orange-100 rounded-full">Explanation</div>
+                        <p className="text-slate-700 font-medium leading-relaxed text-sm md:text-base">
+                          {currentSubCat.questions[currentIdx].explanation}
+                        </p>
+                      </div>
+
+                      <AffiliateLinkButton url={currentAffiliate.url} label={currentAffiliate.label} isQuestionOverride={currentAffiliate.isOverride} />
+
+                      <button onClick={nextQuestion} className="w-full bg-gradient-to-r from-pink-500 to-orange-500 text-white font-black py-5 rounded-[2rem] shadow-xl hover:brightness-110 active:scale-[0.98] transition-all text-xl flex items-center justify-center gap-2 mt-4">
+                        {currentIdx + 1 === currentSubCat.questions.length ? '結果を見る' : '次の問題へ'} <ChevronRight className="w-6 h-6" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* VIEW: RESULT */}
+            {view === 'result' && (
+              <div className="text-center space-y-8 animate-in zoom-in-90 duration-700">
+                <div className="relative pt-10">
+                  <div className="absolute inset-0 flex items-center justify-center opacity-10"><Trophy className="w-64 h-64 text-yellow-500" /></div>
+                  <div className="relative z-10 space-y-4">
+                    <h2 className="text-3xl font-black text-slate-800">クイズ完了！</h2>
+                    <div className="flex flex-col items-center">
+                      <div className="text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-orange-500">
+                        {score}<span className="text-2xl text-slate-400 font-black ml-1">/ {currentSubCat.questions.length}</span>
+                      </div>
+                      <div className={`mt-2 font-black text-xl px-6 py-2 rounded-full bg-white shadow-sm border border-slate-100 ${getRank().color}`}>称号：{getRank().title}</div>
+                      
+                      <div className="mt-4 animate-bounce inline-flex items-center gap-2 bg-yellow-100 text-yellow-700 px-6 py-2.5 rounded-full font-black border-2 border-yellow-300 shadow-sm">
+                        <Star className="w-5 h-5 fill-yellow-500 text-yellow-500" />
+                        ポップスター GET！🌟
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button 
+                    onClick={shareOnX} 
+                    className="w-full bg-[#1DA1F2] text-white font-black py-4 rounded-2xl hover:bg-[#1a8cd8] active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-lg text-sm"
+                  >
+                    <Share2 className="w-5 h-5" /> Xでシェア
+                  </button>
+                  <button 
+                    onClick={shareGeneral} 
+                    className="w-full bg-slate-800 text-white font-black py-4 rounded-2xl hover:bg-slate-700 active:scale-[0.98] transition-all flex items-center justify-center gap-2 shadow-lg text-sm"
+                  >
+                    <Share2 className="w-5 h-5" /> その他のSNS
+                  </button>
+                </div>
+
+                <div className="py-2">
+                  <AffiliateLinkButton url={currentSubCat.affiliateUrl} label={currentSubCat.affiliateLabel} isQuestionOverride={false} />
+                </div>
+
+                <button onClick={reset} className="w-full bg-white text-slate-600 border-b-4 border-slate-200 font-black py-5 rounded-[2rem] hover:bg-slate-50 active:translate-y-1 transition-all flex items-center justify-center gap-2 shadow-lg">
+                  <RotateCcw className="w-6 h-6" /> 別のクイズに挑戦
+                </button>
+              </div>
+            )}
+
+            {/* VIEW: ADMIN LOGIN */}
+            {view === 'admin_login' && (
+              <div className="bg-white p-10 rounded-[3rem] shadow-2xl animate-in zoom-in-95 duration-500">
+                <h2 className="text-2xl font-black text-slate-800 text-center mb-4">管理者ログイン</h2>
+                <form onSubmit={handleAdminLogin} className="space-y-4">
+                  <input type="password" placeholder="Pass: admin123" className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-center font-medium" value={adminPass} onChange={(e) => setAdminPass(e.target.value)} />
+                  {adminError && <p className="text-red-500 text-sm font-bold text-center">{adminError}</p>}
+                  <button className="w-full bg-pink-500 text-white font-black py-4 rounded-2xl shadow-lg">ログイン</button>
+                  <button type="button" onClick={() => setView('home')} className="w-full text-slate-400 font-bold text-sm">戻る</button>
+                </form>
+              </div>
+            )}
+
+            {/* VIEW: ADMIN DASHBOARD */}
+            {view === 'admin_dashboard' && (
+              <div className="space-y-6 pb-20">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-black text-pink-500">管理者パネル</h2>
+                  <button onClick={() => setView('home')} className="p-2 bg-white rounded-full shadow-sm hover:bg-slate-50"><X className="w-6 h-6 text-slate-400" /></button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <button onClick={addMainCategory} className="bg-white border-2 border-pink-200 text-pink-500 font-black py-4 rounded-2xl flex flex-col items-center justify-center gap-1 shadow-sm active:scale-95 transition-all"><Plus className="w-5 h-5" /><span className="text-xs">メインカテゴリ作成</span></button>
+                  <button onClick={seedDatabase} disabled={isSeeding} className="bg-cyan-500 text-white font-black py-4 rounded-2xl flex flex-col items-center justify-center gap-1 shadow-lg disabled:opacity-50 active:scale-95 transition-all"><Database className="w-5 h-5" /><span className="text-xs">サンプル投入</span></button>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <button onClick={exportCSV} className="bg-slate-100 text-slate-600 font-bold py-3 rounded-2xl flex items-center justify-center gap-2 hover:bg-slate-200 active:scale-95 transition-all text-sm shadow-sm border border-slate-200"><DownloadCloud className="w-4 h-4" /> CSVを出力</button>
+                  <button onClick={() => fileInputRef.current?.click()} className="bg-slate-100 text-slate-600 font-bold py-3 rounded-2xl flex items-center justify-center gap-2 hover:bg-slate-200 active:scale-95 transition-all text-sm shadow-sm border border-slate-200"><Upload className="w-4 h-4" /> CSVから追加</button>
+                  <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".csv" className="hidden" />
+                </div>
+
+                <div className="space-y-4">
+                  {categories.map((mainCat) => (
+                    <div key={mainCat.id} className="bg-white rounded-[2rem] border-2 border-slate-100 overflow-hidden shadow-sm">
+                      <div className="p-5 flex items-center justify-between border-b border-slate-50 bg-slate-50/50">
+                        <div className="flex items-center gap-3">
+                          <span className="text-2xl">{mainCat.emoji}</span>
+                          <div>
+                            <h3 className="font-bold text-slate-800">{mainCat.name}</h3>
+                            <p className="text-[10px] text-slate-400">{mainCat.subCategories?.length || 0} サブカテゴリ</p>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => setEditingMainCatId(editingMainCatId === mainCat.id ? null : mainCat.id)} className={`p-2 rounded-xl transition-all ${editingMainCatId === mainCat.id ? 'bg-pink-500 text-white' : 'bg-white text-slate-600 border'}`}><Settings className="w-5 h-5" /></button>
+                          <button onClick={() => deleteMainCategory(mainCat.id)} className="p-2 bg-white border text-red-500 rounded-xl hover:bg-red-50 transition-colors"><Trash2 className="w-5 h-5" /></button>
+                        </div>
+                      </div>
+
+                      {editingMainCatId === mainCat.id && (
+                        <div className="p-5 space-y-4 animate-in slide-in-from-top-2 duration-300">
+                          <button onClick={() => addSubCategory(mainCat)} className="w-full bg-slate-100 text-slate-600 font-bold py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-slate-200 transition-all text-sm"><Plus className="w-4 h-4" /> サブカテゴリを追加</button>
+                          
+                          {/* SubCategories List */}
+                          <div className="space-y-3">
+                            {mainCat.subCategories?.map((subCat) => (
+                              <div key={subCat.id} className="border-2 border-pink-100 rounded-2xl overflow-hidden">
+                                <div className="bg-pink-50/50 p-4 flex justify-between items-center">
+                                  <div>
+                                    <h4 className="font-bold text-pink-600">{subCat.name}</h4>
+                                    <p className="text-xs text-slate-500">{subCat.questions?.length || 0}問</p>
+                                  </div>
+                                  <div className="flex gap-2">
+                                    <button onClick={() => setEditingSubCatId(editingSubCatId === subCat.id ? null : subCat.id)} className={`p-2 rounded-lg text-xs font-bold transition-all ${editingSubCatId === subCat.id ? 'bg-pink-500 text-white' : 'bg-white text-pink-500 border border-pink-200'}`}>問題・詳細管理</button>
+                                    <button onClick={() => deleteSubCategory(mainCat, subCat.id)} className="p-2 text-red-400 hover:bg-red-50 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+                                  </div>
+                                </div>
+
+                                {editingSubCatId === subCat.id && (
+                                  <div className="p-4 bg-white space-y-6">
+                                    {/* Edit SubCategory Default Info */}
+                                    <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                                      <h5 className="font-bold text-xs text-slate-500">サブカテゴリ基本情報</h5>
+                                      <input placeholder="サブカテゴリ名" className="w-full p-2 border rounded-lg text-sm" value={subCat.name} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { name: e.target.value })} />
+                                      <input placeholder="説明文" className="w-full p-2 border rounded-lg text-sm" value={subCat.description} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { description: e.target.value })} />
+                                      <input placeholder="アフィリエイトボタンのラベル" className="w-full p-2 border rounded-lg text-sm border-blue-200 bg-blue-50/50" value={subCat.affiliateLabel || ''} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { affiliateLabel: e.target.value })} />
+                                      <input placeholder="アフィリエイトURL" className="w-full p-2 border rounded-lg text-sm border-blue-200 bg-blue-50/50" value={subCat.affiliateUrl || ''} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { affiliateUrl: e.target.value })} />
+                                    </div>
+
+                                    {/* Add Question */}
+                                    <div className="space-y-4">
+                                      <h5 className="font-black text-xs text-pink-500 uppercase tracking-wider flex items-center gap-2"><Plus className="w-3 h-3" /> 新しい問題を追加</h5>
+                                      <div className="flex gap-2 p-1 bg-slate-100 rounded-xl overflow-x-auto">
+                                        {['choice', 'boolean', 'input', 'sorting'].map(t => (
+                                          <button key={t} onClick={() => setQuizType(t)} className={`flex-1 py-2 px-3 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${quizType === t ? 'bg-white text-pink-500 shadow-sm' : 'text-slate-400'}`}>
+                                            {t === 'choice' ? '4択' : t === 'boolean' ? '〇✕' : t === 'input' ? '入力' : '並べ替え'}
+                                          </button>
+                                        ))}
+                                      </div>
+
+                                      <input placeholder="問題文" className="w-full p-3 bg-slate-50 border rounded-xl text-sm" value={newQuiz.q} onChange={(e) => setNewQuiz({...newQuiz, q: e.target.value})} />
+                                      
+                                      {quizType === 'choice' && (
+                                        <div className="grid grid-cols-2 gap-2">
+                                          {newQuiz.options.map((opt, i) => (
+                                            <input key={i} placeholder={`選択肢 ${i + 1}`} className={`w-full p-2 border rounded-xl text-sm ${newQuiz.correct === i ? 'border-emerald-500 bg-emerald-50' : ''}`} value={opt} onChange={(e) => { const opts = [...newQuiz.options]; opts[i] = e.target.value; setNewQuiz({...newQuiz, options: opts}); }} onDoubleClick={() => setNewQuiz({...newQuiz, correct: i})} />
+                                          ))}
+                                          <p className="col-span-2 text-[10px] text-slate-400 text-center">※正解をダブルクリック（4択にする場合、残りは空欄のまま）</p>
+                                        </div>
+                                      )}
+
+                                      {quizType === 'boolean' && (
+                                        <div className="flex gap-2">
+                                          <button onClick={() => setNewQuiz({...newQuiz, correct: 0})} className={`flex-1 py-3 rounded-xl font-black border-2 ${newQuiz.correct === 0 ? 'bg-red-50 border-red-500 text-red-500' : 'bg-white border-slate-200 text-slate-300'}`}>〇 (True)</button>
+                                          <button onClick={() => setNewQuiz({...newQuiz, correct: 1})} className={`flex-1 py-3 rounded-xl font-black border-2 ${newQuiz.correct === 1 ? 'bg-blue-50 border-blue-500 text-blue-500' : 'bg-white border-slate-200 text-slate-300'}`}>✕ (False)</button>
+                                        </div>
+                                      )}
+
+                                      {quizType === 'input' && <input placeholder="正解のテキスト" className="w-full p-3 border-2 border-blue-100 bg-blue-50 rounded-xl text-sm font-bold text-blue-800" value={newQuiz.answerText} onChange={(e) => setNewQuiz({...newQuiz, answerText: e.target.value})} />}
+                                      {quizType === 'sorting' && (
+                                        <div className="space-y-2">
+                                          <p className="text-[10px] text-indigo-500 font-bold">正解の順番で上から入力（不要な枠は空欄のまま）</p>
+                                          {newQuiz.options.map((opt, i) => (
+                                            <div key={i} className="flex gap-2 items-center"><span className="text-xs font-bold text-slate-300 w-4">{i+1}</span><input className="w-full p-2 border border-indigo-200 bg-indigo-50 rounded-xl text-sm" value={opt} onChange={(e) => { const opts = [...newQuiz.options]; opts[i] = e.target.value; setNewQuiz({...newQuiz, options: opts}); }} /></div>
+                                          ))}
+                                        </div>
+                                      )}
+
+                                      <textarea placeholder="解説文" className="w-full p-3 bg-slate-50 border rounded-xl text-sm h-20" value={newQuiz.explanation} onChange={(e) => setNewQuiz({...newQuiz, explanation: e.target.value})} />
+                                      
+                                      <div className="p-3 border-2 border-orange-100 bg-orange-50/50 rounded-xl space-y-2">
+                                        <p className="text-[10px] font-bold text-orange-600 flex items-center gap-1"><ShoppingCart className="w-3 h-3"/> 【任意】この問題専用のアフィリエイト上書き設定</p>
+                                        <input placeholder="専用ラベル" className="w-full p-2 border rounded-lg text-sm bg-white" value={newQuiz.affiliateLabel} onChange={(e) => setNewQuiz({...newQuiz, affiliateLabel: e.target.value})} />
+                                        <input placeholder="専用URL" className="w-full p-2 border rounded-lg text-sm bg-white" value={newQuiz.affiliateUrl} onChange={(e) => setNewQuiz({...newQuiz, affiliateUrl: e.target.value})} />
+                                      </div>
+
+                                      <button onClick={() => addQuestionToSubCategory(mainCat, subCat)} className="w-full bg-pink-500 text-white font-bold py-3 rounded-xl shadow-md hover:bg-pink-600 active:scale-95 transition-all"><Save className="w-4 h-4 inline mr-2" /> 問題を追加する</button>
+                                    </div>
+
+                                    {/* Questions List */}
+                                    <div className="space-y-2 pt-4 border-t">
+                                      <h4 className="font-bold text-xs text-slate-400 uppercase tracking-widest">登録済みの問題</h4>
+                                      {subCat.questions?.map((q, qIdx) => (
+                                        <div key={qIdx} className="bg-slate-50 p-3 rounded-xl flex justify-between items-center text-xs shadow-sm border border-slate-100">
+                                          <div className="flex items-center gap-2 overflow-hidden flex-1">
+                                            <span className={`px-1.5 py-0.5 rounded text-[10px] text-white whitespace-nowrap ${q.type === 'input' ? 'bg-blue-400' : q.type === 'sorting' ? 'bg-indigo-400' : q.type === 'boolean' ? 'bg-red-400' : 'bg-pink-400'}`}>
+                                              {q.type === 'input' ? '入力' : q.type === 'sorting' ? '整序' : q.type === 'boolean' ? '〇✕' : '4択'}
+                                            </span>
+                                            <div className="flex flex-col truncate">
+                                              <span className="truncate font-medium text-slate-600">{q.q}</span>
+                                            </div>
+                                          </div>
+                                          <button onClick={() => deleteQuestionFromSubCategory(mainCat, subCat, qIdx)} className="text-slate-300 hover:text-red-500 p-1 ml-2"><Trash2 className="w-4 h-4" /></button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </main>
+
+          {/* Floating Buttons: MyPage & Admin */}
+          <div className="fixed bottom-4 left-4 z-50">
+            <button onClick={() => setView('mypage')} className="px-5 h-14 rounded-full bg-white backdrop-blur shadow-[0_8px_30px_rgb(0,0,0,0.12)] flex items-center justify-center gap-2 text-blue-500 hover:scale-105 hover:text-blue-600 transition-all border-2 border-blue-100 active:scale-95">
+              <User className="w-6 h-6" />
+              <span className="font-bold text-sm tracking-wide">マイページ</span>
+            </button>
+          </div>
+          
+          <div className="fixed bottom-4 right-4 z-50">
+            <button onClick={() => setView(view === 'admin_login' || view === 'admin_dashboard' ? 'home' : 'admin_login')} className="w-10 h-10 rounded-full bg-white/80 backdrop-blur shadow-lg flex items-center justify-center text-slate-400 hover:text-pink-500 transition-all border border-slate-100 active:scale-95">
+              <Settings className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // レンダリング開始
+    const root = createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
