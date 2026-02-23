@@ -109,12 +109,23 @@
       return rows;
     };
 
-    // --- Audio Helper ---
+    // --- Audio Helper (修正版：AudioContextを使い回す) ---
+    let sharedAudioCtx = null;
     const playSound = (type) => {
       try {
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         if (!AudioContext) return;
-        const ctx = new AudioContext();
+
+        // システムが未作成なら1回だけ作成
+        if (!sharedAudioCtx) {
+          sharedAudioCtx = new AudioContext();
+        }
+        // ブラウザの制限で一時停止されている場合は再開する
+        if (sharedAudioCtx.state === 'suspended') {
+          sharedAudioCtx.resume();
+        }
+
+        const ctx = sharedAudioCtx;
         const osc = ctx.createOscillator();
         const gainNode = ctx.createGain();
         osc.connect(gainNode);
@@ -158,19 +169,18 @@
     };
 
     // --- Firebase Configuration ---
-    // ▼▼▼ VERCEL等でデプロイする場合は、以下の情報を書き換えてください ▼▼▼
+    // ▼▼▼ ご自身のFirebase設定情報に書き換えてください ▼▼▼
     const defaultFirebaseConfig = {
-       apiKey: "AIzaSyAXbPIuQ_Kc7oLTHOWbzlPpnEvMFUBLYy8",
-  authDomain: "quizpop-1.firebaseapp.com",
-  projectId: "quizpop-1",
-  storageBucket: "quizpop-1.firebasestorage.app",
-  messagingSenderId: "180317926823",
-  appId: "1:180317926823:web:8af8fd94e117f6385ff282",
-  measurementId: "G-ELVJ1QZG5Q"
-
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_AUTH_DOMAIN",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_STORAGE_BUCKET",
+      messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+      appId: "YOUR_APP_ID",
+      measurementId: "YOUR_MEASUREMENT_ID"
     };
 
-    // 環境判定 (AIエディタ環境か、Vercel環境か)
+    // 環境判定
     const firebaseConfig = typeof __firebase_config !== 'undefined' 
       ? JSON.parse(__firebase_config) 
       : defaultFirebaseConfig;
@@ -287,6 +297,7 @@
       // Admin States
       const [adminPass, setAdminPass] = useState("");
       const [adminError, setAdminError] = useState("");
+      const [newAdminPass, setNewAdminPass] = useState(""); // 新しいパスワード設定用
       const [editingMainCatId, setEditingMainCatId] = useState(null);
       const [editingSubCatId, setEditingSubCatId] = useState(null);
       const [isSeeding, setIsSeeding] = useState(false);
@@ -556,14 +567,43 @@
       };
 
       // --- Admin Logic & CSV ---
-      const handleAdminLogin = (e) => {
+      const handleAdminLogin = async (e) => {
         e.preventDefault();
-        if (adminPass === "admin123") {
-          setView('admin_dashboard');
-          setAdminError("");
-          setAdminPass("");
-        } else {
-          setAdminError("パスワードが違います");
+        try {
+          // Firebaseから保存されたパスワードを取得
+          const adminRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'admin');
+          const adminSnap = await getDoc(adminRef);
+          
+          let validPass = "admin123"; // 初期のフォールバックパスワード。後でコードから消す用
+          
+          if (adminSnap.exists() && adminSnap.data().password) {
+            validPass = adminSnap.data().password; // DBにパスワードがあれば上書き
+          }
+
+          if (adminPass === validPass) {
+            setView('admin_dashboard');
+            setAdminError("");
+            setAdminPass("");
+          } else {
+            setAdminError("パスワードが違います");
+          }
+        } catch (error) {
+          console.error("Login check error:", error);
+          setAdminError("通信エラーが発生しました");
+        }
+      };
+
+      const updateAdminPassword = async () => {
+        if(!newAdminPass) return;
+        try {
+          await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'admin'), {
+            password: newAdminPass
+          }, { merge: true });
+          setModalConfig({ type: 'alert', title: '完了', message: '管理者パスワードを更新しました！', onConfirm: () => setModalConfig(null) });
+          setNewAdminPass("");
+        } catch (e) {
+          console.error(e);
+          setModalConfig({ type: 'alert', title: 'エラー', message: 'パスワードの更新に失敗しました。', onConfirm: () => setModalConfig(null) });
         }
       };
 
@@ -1152,7 +1192,7 @@
             {view === 'quiz' && currentSubCat && (
               <div className={`flex-1 flex flex-col w-full animate-in slide-in-from-right-8 duration-500 relative ${animateFeedback === 'incorrect' ? 'animate-shake' : ''}`}>
                 
-                {/* Animations Overlay */}
+                {/* Animations Overlay - pop-in-outを使用して一定時間で消えるように変更 */}
                 {(animateFeedback === 'correct' || animateFeedback === 'incorrect') && (
                   <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
                     <div className="animate-pop-in-out">
@@ -1161,7 +1201,7 @@
                   </div>
                 )}
 
-                {/* 上部固定エリア */}
+                {/* 上部固定エリア（プログレスバー＆問題文） */}
                 <div className="flex-none space-y-5 pt-2">
                   <div className="w-full bg-white/50 h-3 rounded-full overflow-hidden border border-white p-0.5 shadow-inner">
                     <div className="h-full bg-gradient-to-r from-pink-400 to-orange-400 rounded-full transition-all duration-500" style={{ width: `${((currentIdx + 1) / (currentSubCat.questions?.length || 1)) * 100}%` }} />
@@ -1180,12 +1220,14 @@
                   </div>
                 </div>
 
-                {/* スクロールエリア */}
+                {/* スクロール可能な回答＆解説エリア (スマホで1画面に収まりやすくする) */}
                 <div className="flex-1 overflow-y-auto py-6 space-y-6 flex flex-col">
+                  {/* 回答コンポーネント */}
                   <div className="flex-none">
                     {(currentSubCat.questions[currentIdx].type === 'input') ? <RenderInput /> : (currentSubCat.questions[currentIdx].type === 'sorting') ? <RenderSorting question={currentSubCat.questions[currentIdx]} /> : (currentSubCat.questions[currentIdx].type === 'boolean') ? <RenderBoolean question={currentSubCat.questions[currentIdx]} /> : <RenderChoice question={currentSubCat.questions[currentIdx]} />}
                   </div>
 
+                  {/* 解説・アフィリエイト・次へボタン */}
                   {isAnswered && (
                     <div className="flex-none space-y-4 animate-in fade-in slide-in-from-top-4 duration-500 pb-4">
                       <div className="bg-yellow-50 p-6 rounded-[2rem] border-2 border-dashed border-yellow-300 relative shadow-sm">
@@ -1219,6 +1261,7 @@
                       </div>
                       <div className={`mt-2 font-black text-xl px-6 py-2 rounded-full bg-white shadow-sm border border-slate-100 ${getRank().color}`}>称号：{getRank().title}</div>
                       
+                      {/* Pop Star Reward Banner */}
                       <div className="mt-4 animate-bounce inline-flex items-center gap-2 bg-yellow-100 text-yellow-700 px-6 py-2.5 rounded-full font-black border-2 border-yellow-300 shadow-sm">
                         <Star className="w-5 h-5 fill-yellow-500 text-yellow-500" />
                         ポップスター GET！🌟
@@ -1227,6 +1270,7 @@
                   </div>
                 </div>
 
+                {/* Share Buttons */}
                 <div className="grid grid-cols-2 gap-3">
                   <button 
                     onClick={shareOnX} 
@@ -1242,6 +1286,7 @@
                   </button>
                 </div>
 
+                {/* Default SubCategory Affiliate Link on Result Screen */}
                 <div className="py-2">
                   <AffiliateLinkButton url={currentSubCat.affiliateUrl} label={currentSubCat.affiliateLabel} isQuestionOverride={false} />
                 </div>
@@ -1257,7 +1302,7 @@
               <div className="bg-white p-10 rounded-[3rem] shadow-2xl animate-in zoom-in-95 duration-500">
                 <h2 className="text-2xl font-black text-slate-800 text-center mb-4">管理者ログイン</h2>
                 <form onSubmit={handleAdminLogin} className="space-y-4">
-                  <input type="password" placeholder="Pass: admin123" className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-center font-medium" value={adminPass} onChange={(e) => setAdminPass(e.target.value)} />
+                  <input type="password" placeholder="パスワードを入力" className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-center font-medium" value={adminPass} onChange={(e) => setAdminPass(e.target.value)} />
                   {adminError && <p className="text-red-500 text-sm font-bold text-center">{adminError}</p>}
                   <button className="w-full bg-pink-500 text-white font-black py-4 rounded-2xl shadow-lg">ログイン</button>
                   <button type="button" onClick={() => setView('home')} className="w-full text-slate-400 font-bold text-sm">戻る</button>
@@ -1271,6 +1316,27 @@
                 <div className="flex items-center justify-between">
                   <h2 className="text-2xl font-black text-pink-500">管理者パネル</h2>
                   <button onClick={() => setView('home')} className="p-2 bg-white rounded-full shadow-sm hover:bg-slate-50"><X className="w-6 h-6 text-slate-400" /></button>
+                </div>
+
+                {/* --- Security Settings (Password Update) --- */}
+                <div className="bg-white rounded-[2rem] border-2 border-slate-100 p-5 shadow-sm mb-6 animate-in slide-in-from-top-4 duration-300">
+                  <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Lock className="w-5 h-5 text-slate-400" /> セキュリティ設定</h3>
+                  <div className="flex gap-2">
+                    <input 
+                      type="password" 
+                      placeholder="新しい管理者パスワード" 
+                      className="flex-1 p-3 bg-slate-50 border rounded-xl text-sm outline-none focus:border-pink-300 transition-colors"
+                      value={newAdminPass}
+                      onChange={(e) => setNewAdminPass(e.target.value)}
+                    />
+                    <button 
+                      onClick={updateAdminPassword}
+                      className="bg-slate-800 text-white font-bold px-4 rounded-xl shadow-sm hover:bg-slate-700 active:scale-95 transition-all"
+                    >
+                      変更
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-400 mt-2 font-medium">※ここでパスワードを設定した後、ソースコード内の <code>"admin123"</code> を削除すると安全です。</p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 mb-3">
@@ -1324,11 +1390,11 @@
                                   <div className="p-4 bg-white space-y-6">
                                     {/* Edit SubCategory Default Info */}
                                     <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-100">
-                                      <h5 className="font-bold text-xs text-slate-500">サブカテゴリ基本情報</h5>
+                                      <h5 className="font-bold text-xs text-slate-500">サブカテゴリ基本情報（アフィリエイト等）</h5>
                                       <input placeholder="サブカテゴリ名" className="w-full p-2 border rounded-lg text-sm" value={subCat.name} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { name: e.target.value })} />
                                       <input placeholder="説明文" className="w-full p-2 border rounded-lg text-sm" value={subCat.description} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { description: e.target.value })} />
-                                      <input placeholder="アフィリエイトボタンのラベル" className="w-full p-2 border rounded-lg text-sm border-blue-200 bg-blue-50/50" value={subCat.affiliateLabel || ''} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { affiliateLabel: e.target.value })} />
-                                      <input placeholder="アフィリエイトURL" className="w-full p-2 border rounded-lg text-sm border-blue-200 bg-blue-50/50" value={subCat.affiliateUrl || ''} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { affiliateUrl: e.target.value })} />
+                                      <input placeholder="アフィリエイトボタンのラベル（例：おすすめ参考書）" className="w-full p-2 border rounded-lg text-sm border-blue-200 bg-blue-50/50" value={subCat.affiliateLabel || ''} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { affiliateLabel: e.target.value })} />
+                                      <input placeholder="アフィリエイトURL (https://...)" className="w-full p-2 border rounded-lg text-sm border-blue-200 bg-blue-50/50" value={subCat.affiliateUrl || ''} onChange={(e) => saveSubCategoryDetails(mainCat, subCat, { affiliateUrl: e.target.value })} />
                                     </div>
 
                                     {/* Add Question */}
@@ -1349,7 +1415,7 @@
                                           {newQuiz.options.map((opt, i) => (
                                             <input key={i} placeholder={`選択肢 ${i + 1}`} className={`w-full p-2 border rounded-xl text-sm ${newQuiz.correct === i ? 'border-emerald-500 bg-emerald-50' : ''}`} value={opt} onChange={(e) => { const opts = [...newQuiz.options]; opts[i] = e.target.value; setNewQuiz({...newQuiz, options: opts}); }} onDoubleClick={() => setNewQuiz({...newQuiz, correct: i})} />
                                           ))}
-                                          <p className="col-span-2 text-[10px] text-slate-400 text-center">※正解をダブルクリック（4択にする場合、残りは空欄のまま）</p>
+                                          <p className="col-span-2 text-[10px] text-slate-400 text-center">※正解をダブルクリック（4択にする場合、残りは空欄のままにしてください）</p>
                                         </div>
                                       )}
 
@@ -1372,10 +1438,11 @@
 
                                       <textarea placeholder="解説文" className="w-full p-3 bg-slate-50 border rounded-xl text-sm h-20" value={newQuiz.explanation} onChange={(e) => setNewQuiz({...newQuiz, explanation: e.target.value})} />
                                       
+                                      {/* Optional Affiliate Override */}
                                       <div className="p-3 border-2 border-orange-100 bg-orange-50/50 rounded-xl space-y-2">
                                         <p className="text-[10px] font-bold text-orange-600 flex items-center gap-1"><ShoppingCart className="w-3 h-3"/> 【任意】この問題専用のアフィリエイト上書き設定</p>
-                                        <input placeholder="専用ラベル" className="w-full p-2 border rounded-lg text-sm bg-white" value={newQuiz.affiliateLabel} onChange={(e) => setNewQuiz({...newQuiz, affiliateLabel: e.target.value})} />
-                                        <input placeholder="専用URL" className="w-full p-2 border rounded-lg text-sm bg-white" value={newQuiz.affiliateUrl} onChange={(e) => setNewQuiz({...newQuiz, affiliateUrl: e.target.value})} />
+                                        <input placeholder="専用ラベル（例：この問題の文法書）" className="w-full p-2 border rounded-lg text-sm bg-white" value={newQuiz.affiliateLabel} onChange={(e) => setNewQuiz({...newQuiz, affiliateLabel: e.target.value})} />
+                                        <input placeholder="専用URL (https://...)" className="w-full p-2 border rounded-lg text-sm bg-white" value={newQuiz.affiliateUrl} onChange={(e) => setNewQuiz({...newQuiz, affiliateUrl: e.target.value})} />
                                       </div>
 
                                       <button onClick={() => addQuestionToSubCategory(mainCat, subCat)} className="w-full bg-pink-500 text-white font-bold py-3 rounded-xl shadow-md hover:bg-pink-600 active:scale-95 transition-all"><Save className="w-4 h-4 inline mr-2" /> 問題を追加する</button>
@@ -1392,6 +1459,7 @@
                                             </span>
                                             <div className="flex flex-col truncate">
                                               <span className="truncate font-medium text-slate-600">{q.q}</span>
+                                              {q.affiliateUrl && <span className="text-[9px] text-orange-500 font-bold mt-0.5">🔗 個別アフィ設定あり</span>}
                                             </div>
                                           </div>
                                           <button onClick={() => deleteQuestionFromSubCategory(mainCat, subCat, qIdx)} className="text-slate-300 hover:text-red-500 p-1 ml-2"><Trash2 className="w-4 h-4" /></button>
@@ -1435,4 +1503,3 @@
   </script>
 </body>
 </html>
-
