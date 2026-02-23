@@ -574,7 +574,7 @@
           // Firebaseから保存されたパスワードを取得
           const adminRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'admin');
           const adminSnap = await getDoc(adminRef);
-          in
+          
           let validPass = ""; // 
           
           if (adminSnap.exists() && adminSnap.data().password) {
@@ -1504,5 +1504,6 @@
   </script>
 </body>
 </html>
+
 
 
