@@ -574,8 +574,8 @@
           // Firebaseから保存されたパスワードを取得
           const adminRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'admin');
           const adminSnap = await getDoc(adminRef);
-          
-          let validPass = "admin123"; // 初期のフォールバックパスワード。後でコードから消す用
+          in
+          let validPass = ""; // 
           
           if (adminSnap.exists() && adminSnap.data().password) {
             validPass = adminSnap.data().password; // DBにパスワードがあれば上書き
@@ -1504,4 +1504,5 @@
   </script>
 </body>
 </html>
+
 
